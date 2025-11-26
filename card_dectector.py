@@ -1,4 +1,4 @@
-
+#!/usr/bin/env python3
 import os
 import argparse
 import csv
@@ -9,7 +9,8 @@ from templates import build_templates_from_directory
 from processing import process_card_image
 from symbols import enhanced_rank_classification
 from suit_classifier import classify_suit_v7
-from live_detector import LiveCardDetector
+# NOTE: LiveCardDetector import moved into run_live_mode() to avoid circular import
+
 
 def interactive_process_and_classify(image_path, rank_templates, suit_templates, suit_color_prototypes, interactive=True):
     print(f"\n=== Procesando carta: {os.path.basename(image_path)} ===")
@@ -118,11 +119,17 @@ def interactive_process_and_classify(image_path, rank_templates, suit_templates,
     }
 
 def run_live_mode(camera_url=None):
+    """
+    Ejecuta el modo de detección en vivo
+    """
+    # Import here to avoid circular import: live_detector imports functions from this module.
+    from live_detector import LiveCardDetector
+
     print("Construyendo templates...")
     rank_templates, suit_templates, suit_color_prototypes = build_templates_from_directory("template/")
     print(f"Ranks disponibles: {list(rank_templates.keys())}")
     print(f"Suits disponibles: {list(suit_templates.keys())}")
-    
+
     try:
         detector = LiveCardDetector(
             rank_templates, 

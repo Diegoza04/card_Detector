@@ -1,7 +1,9 @@
+
 import cv2
 import numpy as np
 import math
 from contours import find_contours
+from features import compute_shape_metrics
 
 def extract_symbols_from_corner(corner_rgb, min_area=50, horizontal_gap=20):
     """
@@ -34,10 +36,10 @@ def extract_symbols_from_corner(corner_rgb, min_area=50, horizontal_gap=20):
     kernel_small = np.ones((2,2), np.uint8)
     combined_thresh = cv2.morphologyEx(combined_thresh, cv2.MORPH_CLOSE, kernel_small)
     
-    contours, _ = find_contours(combined_thresh)
+    contours_list, _ = find_contours(combined_thresh)
     boxes = []
     
-    for c in contours:
+    for c in contours_list:
         area = cv2.contourArea(c)
         if area < adaptive_min_area:
             continue
@@ -200,7 +202,11 @@ def enhanced_match_symbol_v2(symbol_img, templates_dict, symbol_type="rank"):
 
 def enhanced_rank_classification(rank_symbol, rank_templates):
     """
-    Clasificación mejorada de ranks con detección específica para números problemáticos
+    Clasificación mejorada de ranks con detección específica para números problemáticos.
+    Mejoras para 2,3,8,10:
+      - heurísticas por proyecciones y componentes conectados
+      - validación extra con versiones modificadas (erosión/dilatación/rotaciones)
+      - uso de métricas de forma (compute_shape_metrics) como soporte
     """
     h, w = rank_symbol.shape
     rank_symbol_enhanced = cv2.equalizeHist(rank_symbol)
@@ -208,17 +214,19 @@ def enhanced_rank_classification(rank_symbol, rank_templates):
     
     name, score, detail = enhanced_match_symbol_v2(rank_symbol_denoised, rank_templates, "rank")
     
-    problematic_pairs = {
-        '8': ['5', '6', '3'],
-        '5': ['8', '6'],
-        '10': ['6', '8'],
-        '3': ['8', '6', '5'],
-        '6': ['8', '5', '3']
-    }
+    # Problemas conocidos
+    problematic = {'8','5','6','3','10','2'}
     
-    if name in problematic_pairs and score < 0.65:
-        print(f"  [Validación extra para '{name}' con score {score:.3f}]")
-        
+    # Quick shape metrics to use in heuristics
+    shape_metrics = compute_shape_metrics(rank_symbol_denoised)
+    
+    # If high confidence, return immediately
+    if score >= 0.80:
+        return name, score
+    
+    # Extended validation for problem digits (2,3,8,10)
+    if (name in problematic) or (score < 0.65):
+        # Prepare variants
         alternative_versions = []
         alternative_versions.append(('original_enhanced', rank_symbol_denoised))
         _, otsu = cv2.threshold(rank_symbol_enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -233,18 +241,22 @@ def enhanced_rank_classification(rank_symbol, rank_templates):
         alternative_versions.append(('thickened', thickened))
         thinned = cv2.dilate(rank_symbol_denoised, kernel_thick, iterations=1)
         alternative_versions.append(('thinned', thinned))
+        # rotated variants (small angles) sometimes help for slanted camera
+        for angle in (-12, -6, 6, 12):
+            M = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
+            rot = cv2.warpAffine(rank_symbol_enhanced, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+            alternative_versions.append((f'rot{angle}', rot))
         
+        # Evaluate alternatives with more scales and prioritize candidate scores for specific digits
         best_candidates = {}
-        
+        scales_to_try = [0.80, 0.90, 1.0, 1.05, 1.10, 1.20]
         for version_name, version_img in alternative_versions:
-            for scale in [0.85, 0.90, 0.95, 1.0, 1.05, 1.10, 1.15]:
+            for scale in scales_to_try:
                 nh, nw = int(h * scale), int(w * scale)
                 if nh <= 0 or nw <= 0:
                     continue
-                
                 scaled = cv2.resize(version_img, (nw, nh))
                 test_name, test_score, _ = enhanced_match_symbol_v2(scaled, rank_templates, "rank")
-                
                 if test_name not in best_candidates or test_score > best_candidates[test_name]['score']:
                     best_candidates[test_name] = {
                         'score': test_score,
@@ -254,84 +266,75 @@ def enhanced_rank_classification(rank_symbol, rank_templates):
         
         if best_candidates:
             sorted_candidates = sorted(best_candidates.items(), key=lambda x: x[1]['score'], reverse=True)
-            
-            print(f"  Top candidatos:")
-            for rank_name, info in sorted_candidates[:3]:
-                print(f"    {rank_name}: {info['score']:.3f} ({info['version']}, scale={info['scale']:.2f})")
-            
-            top_rank, top_info = sorted_candidates[0]
-            second_rank, second_info = sorted_candidates[1] if len(sorted_candidates) > 1 else (None, {'score': 0})
+            # If top candidate has significant lead, accept it
+            top_name, top_info = sorted_candidates[0]
+            second_info = sorted_candidates[1][1] if len(sorted_candidates) > 1 else {'score': 0.0}
             score_diff = top_info['score'] - second_info['score']
             
-            if name == '8' and '5' in [r for r, _ in sorted_candidates[:2]]:
+            # Heurística específica para 8 vs 5/6/3
+            if top_name == '8' or name == '8':
+                # Count inner holes (8 tiene típicamente 2)
                 _, binary = cv2.threshold(rank_symbol_enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
                 inverted = cv2.bitwise_not(binary)
                 num_labels, labels = cv2.connectedComponents(inverted)
-                if num_labels >= 3 and top_rank == '8':
-                    print(f"  → Confirmado '8' por componentes cerrados ({num_labels})")
-                    name, score = '8', max(top_info['score'], 0.70)
-                elif num_labels <= 2 and top_rank == '5':
-                    print(f"  → Confirmado '5' por componentes cerrados ({num_labels})")
-                    name, score = '5', max(top_info['score'], 0.70)
-                elif score_diff > 0.15:
-                    name, score = top_rank, top_info['score']
+                hole_count = max(0, num_labels - 1)
+                if hole_count >= 2:
+                    return '8', max(top_info['score'], 0.75)
+                # otherwise fallthrough to candidate decision if diff large
+                if score_diff > 0.15:
+                    return top_name, top_info['score']
             
-            elif name == '10' and '6' in [r for r, _ in sorted_candidates[:2]]:
-                _, binary = cv2.threshold(rank_symbol_enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-                horizontal_projection = np.sum(binary, axis=0)
-                threshold_valley = 0.2 * horizontal_projection.max()
-                valleys = horizontal_projection < threshold_valley
-                transitions = 0
-                for i in range(1, len(valleys)):
-                    if valleys[i] != valleys[i-1]:
-                        transitions += 1
-                if transitions >= 4 and top_rank == '10':
-                    print(f"  → Confirmado '10' por separación de dígitos ({transitions} transiciones)")
-                    name, score = '10', max(top_info['score'], 0.70)
-                elif transitions <= 3 and top_rank == '6':
-                    print(f"  → Confirmado '6' por dígito único ({transitions} transiciones)")
-                    name, score = '6', max(top_info['score'], 0.70)
-                elif score_diff > 0.15:
-                    name, score = top_rank, top_info['score']
+            # Heurística específica para 10 (dos componentes horizontales)
+            if top_name == '10' or name == '10':
+                _, binary_inv = cv2.threshold(rank_symbol_enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                contours_inv, _ = find_contours(binary_inv)
+                comps = []
+                for c in contours_inv:
+                    a = cv2.contourArea(c)
+                    if a < max(20, (h*w)//500):
+                        continue
+                    x,y,ww,hh = cv2.boundingRect(c)
+                    comps.append((x,ww))
+                # sort by x and check separation
+                if len(comps) >= 2:
+                    comps.sort(key=lambda x: x[0])
+                    first_x, first_w = comps[0]
+                    second_x, second_w = comps[1]
+                    gap = second_x - (first_x + first_w)
+                    if gap > w * 0.20:
+                        return '10', max(top_info['score'], 0.75)
+                if score_diff > 0.2:
+                    return top_name, top_info['score']
             
-            elif name == '3' and any(r in ['6', '8'] for r, _ in sorted_candidates[:2]):
-                _, binary = cv2.threshold(rank_symbol_enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-                h_mid = h // 2
-                w_mid = w // 2
-                top_left = np.sum(binary[:h_mid, :w_mid])
-                top_right = np.sum(binary[:h_mid, w_mid:])
-                bottom_left = np.sum(binary[h_mid:, :w_mid])
-                bottom_right = np.sum(binary[h_mid:, w_mid:])
-                right_ratio = (top_right + bottom_right) / (top_left + bottom_left + 1e-6)
-                if right_ratio > 1.2 and top_rank == '3':
-                    print(f"  → Confirmado '3' por distribución derecha ({right_ratio:.2f})")
-                    name, score = '3', max(top_info['score'], 0.70)
-                elif right_ratio <= 1.2 and top_rank in ['6', '8']:
-                    print(f"  → Confirmado '{top_rank}' por distribución ({right_ratio:.2f})")
-                    name, score = top_rank, max(top_info['score'], 0.70)
-                elif score_diff > 0.15:
-                    name, score = top_rank, top_info['score']
+            # Heurística para distinguir 3 vs 2
+            if top_name in ('3','2') or name in ('3','2'):
+                # Use right/left pixel distribution in inverted binary
+                _, binary_inv = cv2.threshold(rank_symbol_enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                mid = binary_inv.shape[1] // 2
+                left_sum = np.sum(binary_inv[:, :mid] > 0)
+                right_sum = np.sum(binary_inv[:, mid:] > 0)
+                if right_sum > 1.3 * left_sum:
+                    return '3', max(top_info['score'], 0.7)
+                # 2 tends to have a stronger top horizontal stroke and right-bottom diagonal
+                top_strip = rank_symbol_enhanced[:max(2, h//6), :]
+                top_strength = np.sum(top_strip > 0)
+                total = np.sum(rank_symbol_enhanced > 0) + 1e-6
+                top_ratio = top_strength / total
+                # If top horizontal significant -> bias to '2'
+                if top_ratio > 0.18:
+                    return '2', max(top_info['score'], 0.68)
+                if score_diff > 0.15:
+                    return top_name, top_info['score']
             
-            elif score_diff > 0.20:
-                name, score = top_rank, top_info['score']
-            elif top_info['score'] > 0.70:
-                name, score = top_rank, top_info['score']
+            # Otherwise, if best candidate much better, take it
+            if score_diff > 0.20 or top_info['score'] > 0.72:
+                return top_name, top_info['score']
     
-    elif score < 0.50:
-        best_name, best_score = name, score
-        
-        for scale in [0.85, 0.90, 0.95, 1.0, 1.05, 1.10]:
-            nh, nw = int(h * scale), int(w * scale)
-            if nh <= 0 or nw <= 0:
-                continue
-            
-            scaled = cv2.resize(rank_symbol_denoised, (nw, nh))
-            n_name, n_score, _ = enhanced_match_symbol_v2(scaled, rank_templates, "rank")
-            
-            if n_score > best_score:
-                best_score = n_score
-                best_name = n_name
-        
-        return best_name, best_score
-    
+    # As final fallback, if low score but shape metrics give hints:
+    if score < 0.55:
+        # If shape shows many holes -> 8
+        if shape_metrics["defects"] >= 2 and shape_metrics["circularity"] > 0.4:
+            return '8', max(score, 0.65)
+        # If aspect ratio narrow and vertical strokes -> likely '1' but we don't alter here
+        # If vertex count small and radial uniformity (approx) maybe '2'/'3' decisions already tried
     return name, score
