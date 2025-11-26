@@ -4,15 +4,10 @@ import time
 import os
 from collections import deque, Counter
 
-from card_dectector import (
-    find_card_contour_from_binary,
-    four_point_transform,
-    extract_top_left_corner,
-    extract_symbols_from_corner,
-    enhanced_rank_classification,
-    classify_suit_v7,
-    find_all_card_contours_from_binary  # NUEVO
-)
+from contours import find_all_card_contours_from_binary
+from transforms import four_point_transform, extract_top_left_corner
+from symbols import extract_symbols_from_corner, enhanced_rank_classification
+from suit_classifier import classify_suit_v7
 
 class LiveCardDetector:
     def __init__(self, rank_templates, suit_templates, suit_color_prototypes, camera_source=None):
@@ -33,30 +28,22 @@ class LiveCardDetector:
         self.paused = False
         self.last_frame = None
 
-        # Historial por “celda” (posición) para estabilizar cada carta
-        # key -> deque([(rank,suit)])
         self.per_card_histories = {}
         self.history_len = 6
-        self.stable_threshold = 3  # mínimo apariciones para considerar estable
+        self.stable_threshold = 3
 
-        # Guardar último warp por key para captura individual si quieres
         self.last_warps = {}
 
         self.detection_cooldown = 0.8
         self.last_announce_time = 0
-        self.last_announced_cards = set()  # {(rank,suit,key)}
+        self.last_announced_cards = set()
 
     def _cell_key(self, contour):
-        """
-        Genera una clave de celda para agrupar detecciones de la misma carta
-        basado en el centro aproximado del contorno.
-        """
         M = cv2.moments(contour)
         if M["m00"] == 0:
             return None
         cx = int(M["m10"] / M["m00"])
         cy = int(M["m01"] / M["m00"])
-        # Cuantizar para evitar variaciones pequeñas
         return (cx // 40, cy // 40)
 
     def _update_history(self, key, rank, suit):
@@ -81,32 +68,21 @@ class LiveCardDetector:
         return None, None
 
     def process_frame_multi(self, frame):
-        """
-        Procesa el frame y detecta múltiples cartas.
-        Devuelve:
-          frame_annotated,
-          detecciones = [ { 'key':key, 'rank':r, 'suit':s, 'stable':bool,
-                            'scores':(rank_score,suit_score), 'contour':approx } ]
-        """
         annotated = frame.copy()
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        # Obtener TODOS los contornos candidatos
         candidates = find_all_card_contours_from_binary(binary, min_area=self.min_card_area)
         detections = []
 
         for approx, area in candidates:
-            # Obtener key para estabilización
             key = self._cell_key(approx)
-            # Warp
             warped = four_point_transform(frame_rgb, approx, width=300, height=420)
             corner = extract_top_left_corner(warped)
             _, symbols = extract_symbols_from_corner(corner)
 
             if len(symbols) < 2:
-                # Dibujar contorno en amarillo (insuficientes símbolos)
                 cv2.drawContours(annotated, [approx], -1, (0, 255, 255), 2)
                 continue
 
@@ -118,12 +94,10 @@ class LiveCardDetector:
                 suit_sym, corner, self.suit_templates, self.suit_color_prototypes
             )
 
-            # Filtro mínimo
             if rank_score < 0.25 or suit_score < 0.25:
                 cv2.drawContours(annotated, [approx], -1, (0, 255, 255), 2)
                 continue
 
-            # Actualizar historial
             self._update_history(key, rank_match, suit_match)
             stable_rank, stable_suit = self._stable_vote(key)
 
@@ -131,18 +105,15 @@ class LiveCardDetector:
             final_rank = stable_rank if stable else rank_match
             final_suit = stable_suit if stable else suit_match
 
-            # Color del contorno
             color = (0, 255, 0) if stable else (255, 255, 0)
             cv2.drawContours(annotated, [approx], -1, color, 3)
 
-            # Texto
             x,y,wc,hc = cv2.boundingRect(approx)
             label = f"{final_rank} {final_suit}"
             cv2.rectangle(annotated, (x, y-25), (x+wc, y), (0,0,0), -1)
             cv2.putText(annotated, label, (x+5, y-7),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0) if stable else (0,255,255), 1)
 
-            # Guardar warp para posible captura
             if key is not None:
                 self.last_warps[key] = warped
 
@@ -168,7 +139,6 @@ class LiveCardDetector:
         cv2.putText(frame, f"Cartas detectadas: {len(detections)}", (10, 45),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
 
-        # Panel lateral (opcional)
         panel_w = 260
         overlay2 = frame.copy()
         cv2.rectangle(overlay2, (w - panel_w, 0), (w, h), (0, 0, 0), -1)
@@ -178,13 +148,12 @@ class LiveCardDetector:
         cv2.putText(frame, "DETALLES:", (w - panel_w + 10, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
 
-        for i, det in enumerate(detections[:12]):  # limitar listado
+        for i, det in enumerate(detections[:12]):
             txt = f"{i+1}. {det['rank']} {det['suit']} {'(S)' if det['stable'] else ''}"
             cv2.putText(frame, txt, (w - panel_w + 10, y0 + i*25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (0,255,0) if det["stable"] else (0,255,255), 1)
 
-        # Instrucciones abajo
         instructions = [
             "Q: Salir | C: Capturar todas | R: Reiniciar historial",
             "ESPACIO: Pausa | A/Z: Ajustar área mínima"
@@ -218,7 +187,6 @@ class LiveCardDetector:
                     fps = 30 / (now - fps_time)
                     fps_time = now
 
-                # Anunciar nuevas cartas estables
                 now = time.time()
                 for det in detections:
                     if det["stable"]:
@@ -259,7 +227,6 @@ class LiveCardDetector:
                 self.min_card_area = max(8000, self.min_card_area - 5000)
                 print(f"Área mínima ahora: {self.min_card_area}")
             elif key in (ord('c'), ord('C')):
-                # Capturar warps de cartas estables
                 stable_warps = [ (k, self.last_warps[k]) for k in self.last_warps if self._stable_vote(k)[0] ]
                 if not stable_warps:
                     print("No hay cartas estables para capturar.")
