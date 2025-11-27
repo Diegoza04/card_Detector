@@ -1,4 +1,3 @@
-
 import os
 import cv2
 import numpy as np
@@ -249,98 +248,87 @@ def four_point_transform(image_rgb, pts, width=300, height=420):
     
     return warped
 
-def extract_top_left_corner(warped_card, w_ratio=0.28, h_ratio=0.40):
+# REPLACE: extract_top_left_corner (ajustes ROI)
+def extract_top_left_corner(warped_card, w_ratio=0.32, h_ratio=0.46):
     """
-    Extrae la esquina superior izquierda con proporciones ajustadas
+    Extrae la esquina superior izquierda con proporciones ajustadas.
+    Ajustado para capturar mejor índices (incluyendo 10 como dos dígitos).
     """
     h, w = warped_card.shape[:2]
-    
-    # Ajustar las proporciones basándose en el tamaño real de la carta warpada
-    # Para cartas más pequeñas, usar proporciones ligeramente mayores
-    if w < 250:  # Carta pequeña, usar proporciones mayores
-        w_ratio = min(w_ratio * 1.2, 0.35)
-        h_ratio = min(h_ratio * 1.2, 0.45)
-    
+
+    # Ajuste dinámico según tamaño de la carta warpada
+    if w < 250:
+        w_ratio = min(w_ratio * 1.15, 0.36)
+        h_ratio = min(h_ratio * 1.12, 0.50)
+
     rw = int(w * w_ratio)
     rh = int(h * h_ratio)
-    
-    # Asegurar dimensiones mínimas para la esquina
-    rw = max(rw, 60)  # Mínimo 60 píxeles de ancho
-    rh = max(rh, 80)  # Mínimo 80 píxeles de alto
-    
-    # No exceder las dimensiones de la carta
+
+    # Mínimos más altos para evitar recortes de dígitos/palos
+    rw = max(rw, 80)  # antes 60
+    rh = max(rh, 100) # antes 80
+
     rw = min(rw, w)
     rh = min(rh, h)
-    
-    print(f"Esquina extraída: {rw}x{rh} de carta {w}x{h}")
-    
+
     return warped_card[0:rh, 0:rw].copy()
 
-def extract_symbols_from_corner(corner_rgb, min_area=50, horizontal_gap=20):
+# REPLACE: extract_symbols_from_corner (mejor separación rank/palo y no fusionar 1+0)
+def extract_symbols_from_corner(corner_rgb, min_area=50, horizontal_gap=15):
     """
-    Extrae símbolos de la esquina con mejor manejo de tamaños variables y múltiples umbrales
+    Extrae símbolos de la esquina con manejo de tamaños y múltiples umbrales.
+    Ajustes:
+    - horizontal_gap más bajo para evitar fusionar '1' y '0' del '10'.
+    - adaptive_min_area más alto basado en tamaño de ROI.
+    - Separación por altura: rank arriba, palo abajo.
     """
     gray = cv2.cvtColor(corner_rgb, cv2.COLOR_RGB2GRAY)
     h, w = gray.shape
-    
-    # Ajustar el área mínima basándose en el tamaño de la esquina
-    adaptive_min_area = max(min_area, (h * w) // 200)
-    
-    # Probar múltiples métodos de umbralización para mayor robustez
+
+    # Área mínima adaptativa más estricta
+    adaptive_min_area = max(min_area, (h * w) // 150)
+
     thresholds = []
-    
-    # 1. Otsu básico
+    # Otsu
     _, thresh1 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     thresholds.append(thresh1)
-    
-    # 2. Umbral adaptativo Gaussian
+    # Adaptativo Gaussian
     thresh2 = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                      cv2.THRESH_BINARY_INV, 11, 2)
     thresholds.append(thresh2)
-    
-    # 3. Umbral adaptativo Mean
+    # Adaptativo Mean
     thresh3 = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
                                      cv2.THRESH_BINARY_INV, 11, 2)
     thresholds.append(thresh3)
-    
-    # Combinar resultados de múltiples umbrales
+
     combined_thresh = np.zeros_like(gray)
     for t in thresholds:
         combined_thresh = cv2.bitwise_or(combined_thresh, t)
-    
-    # Aplicar filtro de mediana para reducir ruido
+
     combined_thresh = cv2.medianBlur(combined_thresh, 3)
-    
-    # Aplicar operaciones morfológicas para mejorar la calidad
-    kernel_small = np.ones((2,2), np.uint8)
+    kernel_small = np.ones((2, 2), np.uint8)
     combined_thresh = cv2.morphologyEx(combined_thresh, cv2.MORPH_CLOSE, kernel_small)
-    
+
     contours, _ = find_contours(combined_thresh)
     boxes = []
-    
     for c in contours:
         area = cv2.contourArea(c)
         if area < adaptive_min_area:
             continue
-            
         x, y, w_box, h_box = cv2.boundingRect(c)
-        
-        # Filtrar cajas demasiado pequeñas o con proporciones extrañas
         if w_box < 5 or h_box < 5:
             continue
         if w_box / h_box > 5 or h_box / w_box > 8:
             continue
-            
-        boxes.append([x, y, x+w_box, y+h_box])
-    
+        boxes.append([x, y, x + w_box, y + h_box])
+
     if not boxes:
-        # Si no encontramos nada, usar solo el mejor threshold
         return combined_thresh, []
-    
-    # Ordenar por posición
+
+    # Orden preliminar por fila y columna
     boxes.sort(key=lambda b: (b[1], b[0]))
-    
-    # Fusionar cajas cercanas
+
+    # Fusion controlado
     merged = []
     for box in boxes:
         x1, y1, x2, y2 = box
@@ -352,32 +340,52 @@ def extract_symbols_from_corner(corner_rgb, min_area=50, horizontal_gap=20):
                 merged[-1] = [min(mx1, x1), min(my1, y1), max(mx2, x2), max(my2, y2)]
             else:
                 merged.append([x1, y1, x2, y2])
-    
-    merged.sort(key=lambda b: (b[1], b[0]))
-    
-    # Extraer símbolos
-    symbols = []
+
+    # Separar rank y palo por altura
+    rank_candidates = []
+    suit_candidates = []
+    rank_band = int(h * 0.55)  # arriba 55% es rank
+    suit_band_start = int(h * 0.35)  # abajo 65% es palo
+
     for (x1, y1, x2, y2) in merged:
-        pad = 3  # Más padding para capturar mejor los símbolos
+        if y2 <= rank_band:
+            rank_candidates.append([x1, y1, x2, y2])
+        elif y1 >= suit_band_start:
+            suit_candidates.append([x1, y1, x2, y2])
+
+    # Si no se separó bien, usa merged completo
+    selection = []
+    if rank_candidates:
+        # el más grande por área
+        rc = max(rank_candidates, key=lambda b: (b[2]-b[0])*(b[3]-b[1]))
+        selection.append(rc)
+    if suit_candidates:
+        sc = max(suit_candidates, key=lambda b: (b[2]-b[0])*(b[3]-b[1]))
+        selection.append(sc)
+
+    if not selection:
+        selection = merged
+
+    # Recortes finales
+    symbols = []
+    for (x1, y1, x2, y2) in selection:
+        pad = 3
         x1_pad = max(0, x1 - pad)
         y1_pad = max(0, y1 - pad)
         x2_pad = min(w, x2 + pad)
         y2_pad = min(h, y2 + pad)
-        
         crop = combined_thresh[y1_pad:y2_pad, x1_pad:x2_pad]
-        
         if crop.shape[0] > 5 and crop.shape[1] > 5:
-            # Limpiar el símbolo extraído
             crop_clean = cv2.morphologyEx(crop, cv2.MORPH_OPEN, kernel_small)
             symbols.append(crop_clean)
-    
-    print(f"Símbolos extraídos: {len(symbols)} de esquina {w}x{h}")
-    
+
+    print(f"Símbolos extraídos (rank/palo): {len(symbols)} de esquina {w}x{h}")
     return combined_thresh, symbols
 
+# REPLACE: multi_template_scores (añadir más escalas)
 def multi_template_scores(symbol_img, templates_list):
     """
-    Mejorado con más robustez para condiciones de cámara en vivo
+    Mejorado con más robustez para condiciones de cámara en vivo y ampliación de escalas.
     """
     if symbol_img is None or len(templates_list) == 0:
         return 0.0, {}
@@ -386,12 +394,10 @@ def multi_template_scores(symbol_img, templates_list):
     
     # Normalizar el símbolo de entrada
     symbol_norm = cv2.resize(symbol_img, (W0, W0))
-    
-    # Mejorar contraste
     symbol_norm = cv2.equalizeHist(symbol_norm)
     
     # Calcular características del símbolo
-    symbol_edges = cv2.Canny(symbol_norm, 30, 150)  # Umbrales más bajos para mejor detección
+    symbol_edges = cv2.Canny(symbol_norm, 30, 150)
     symbol_inv = cv2.bitwise_not(symbol_norm)
     dist_symbol = cv2.distanceTransform(symbol_inv, cv2.DIST_L2, 3)
     
@@ -402,12 +408,11 @@ def multi_template_scores(symbol_img, templates_list):
     best_detail = None
     
     for tmpl in templates_list:
-        # Probar con diferentes escalas para mayor robustez
-        scales = [0.9, 1.0, 1.1]
+        # Escalas ampliadas
+        scales = [0.80, 0.85, 0.90, 1.0, 1.10, 1.15, 1.20]
         scale_scores = []
         
         for scale in scales:
-            # Escalar template
             h_tmpl, w_tmpl = tmpl.shape
             new_h, new_w = int(h_tmpl * scale), int(w_tmpl * scale)
             if new_h <= 0 or new_w <= 0 or new_h > W0*2 or new_w > W0*2:
@@ -457,7 +462,7 @@ def multi_template_scores(symbol_img, templates_list):
                         (2 * cov + 1e-6) / (std_s**2 + std_t**2 + 1e-6)
             ssim_score = max(0, min(1, ssim_score))  # Clamp entre 0 y 1
             
-            # Score combinado con pesos ajustados para live detection
+            # Score combinado con pesos
             combined = (0.30 * corr_score + 
                        0.20 * edge_score + 
                        0.20 * chamfer_score + 
@@ -503,197 +508,203 @@ def enhanced_match_symbol_v2(symbol_img, templates_dict, symbol_type="rank"):
 # =========================================================
 # Rank
 # =========================================================
+# REPLACE: enhanced_rank_classification (añadir reglas '2' y '10' doble dígito)
 def enhanced_rank_classification(rank_symbol, rank_templates):
     """
-    Clasificación mejorada de ranks con detección específica para números problemáticos
+    Clasificación mejorada de ranks con detección específica para números problemáticos,
+    incluyendo reglas nuevas para '2' y manejo de '10' como doble dígito.
     """
-    # Preprocesar el símbolo
     h, w = rank_symbol.shape
-    
-    # Mejorar contraste
+
+    # Mejorar contraste + suavizado
     rank_symbol_enhanced = cv2.equalizeHist(rank_symbol)
-    
-    # Aplicar filtro bilateral para reducir ruido manteniendo bordes
     rank_symbol_denoised = cv2.bilateralFilter(rank_symbol_enhanced, 5, 50, 50)
-    
-    # Clasificación básica con símbolo mejorado
+
+    # Intento especial: detectar '10' como dos dígitos separados (1 y 0)
+    # Solo si tenemos plantillas de '1' y '0' en rank_templates
+    has_one = '1' in rank_templates
+    has_zero = '0' in rank_templates
+    combined_10_score = -1.0
+    combined_10_valid = False
+    if has_one and has_zero:
+        # Segmentar componentes conectados
+        _, otsu_bin = cv2.threshold(rank_symbol_enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        contours, _ = find_contours(otsu_bin)
+        comp_rects = []
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < max(10, (h*w)//400):
+                continue
+            x,y,wc,hc = cv2.boundingRect(c)
+            # filtros razonables de proporción
+            if wc < 4 or hc < 8:
+                continue
+            comp_rects.append((x,y,wc,hc))
+        if len(comp_rects) >= 2:
+            comp_rects.sort(key=lambda r: r[0])  # izquierda a derecha
+            # Tomar las dos más grandes
+            comps = sorted(comp_rects, key=lambda r: r[2]*r[3], reverse=True)[:2]
+            comps.sort(key=lambda r: r[0])
+            (x1,y1,w1,h1), (x2,y2,w2,h2) = comps
+            c1 = rank_symbol_enhanced[y1:y1+h1, x1:x1+w1]
+            c2 = rank_symbol_enhanced[y2:y2+h2, x2:x2+w2]
+            # Normalizar tamaños
+            c1 = cv2.resize(c1, (max(12, w1), max(18, h1)))
+            c2 = cv2.resize(c2, (max(12, w2), max(18, h2)))
+            # Matching por separado
+            s1, _ = multi_template_scores(c1, rank_templates['1'])
+            s0, _ = multi_template_scores(c2, rank_templates['0'])
+            if s1 > 0.50 and s0 > 0.50:
+                combined_10_valid = True
+                combined_10_score = min(s1, s0)
+
+    # Matching general
     name, score, detail = enhanced_match_symbol_v2(rank_symbol_denoised, rank_templates, "rank")
-    
-    # NUEVA LÓGICA: Validación específica para números problemáticos
+
+    # Si el combinado de '10' es mejor, usarlo
+    if combined_10_valid and combined_10_score > max(score, 0.60):
+        name = '10'
+        score = combined_10_score
+
+    # Pares problemáticos (añadimos '2')
     problematic_pairs = {
-        '8': ['5', '6', '3'],  # 8 se confunde con estos
-        '5': ['8', '6'],       # 5 se confunde con estos
-        '10': ['6', '8'],      # 10 se confunde con estos
-        '3': ['8', '6', '5'],  # 3 se confunde con estos
-        '6': ['8', '5', '3']   # 6 se confunde con estos
+        '8': ['5', '6', '3'],
+        '5': ['8', '6'],
+        '10': ['6', '8'],
+        '3': ['8', '6', '5'],
+        '6': ['8', '5', '3'],
+        '2': ['3', '7', 'J']  # nuevo
     }
-    
-    # Si detectamos uno de los números problemáticos con score bajo, hacer validación extra
+
+    # Validaciones específicas si score bajo
     if name in problematic_pairs and score < 0.65:
-        print(f"  [Validación extra para '{name}' con score {score:.3f}]")
-        
-        # Crear versiones alternativas del símbolo para mejorar matching
+        # Versiones alternativas
         alternative_versions = []
-        
-        # 1. Original mejorado
         alternative_versions.append(('original_enhanced', rank_symbol_denoised))
-        
-        # 2. Con umbral Otsu
         _, otsu = cv2.threshold(rank_symbol_enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         alternative_versions.append(('otsu', otsu))
-        
-        # 3. Con umbral adaptativo Gaussian
         adaptive_gauss = cv2.adaptiveThreshold(
             rank_symbol_enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY, 15, 3
         )
         alternative_versions.append(('adaptive_gauss', adaptive_gauss))
-        
-        # 4. Con erosión para hacer más gruesos los trazos (útil para distinguir 8 vs 5)
         kernel_thick = np.ones((2, 2), np.uint8)
         thickened = cv2.erode(rank_symbol_denoised, kernel_thick, iterations=1)
         alternative_versions.append(('thickened', thickened))
-        
-        # 5. Con dilatación para hacer más delgados (útil para 10 vs 6)
         thinned = cv2.dilate(rank_symbol_denoised, kernel_thick, iterations=1)
         alternative_versions.append(('thinned', thinned))
-        
-        # Probar todas las versiones con diferentes escalas
+
         best_candidates = {}
-        
         for version_name, version_img in alternative_versions:
             for scale in [0.85, 0.90, 0.95, 1.0, 1.05, 1.10, 1.15]:
                 nh, nw = int(h * scale), int(w * scale)
                 if nh <= 0 or nw <= 0:
                     continue
-                
                 scaled = cv2.resize(version_img, (nw, nh))
                 test_name, test_score, _ = enhanced_match_symbol_v2(scaled, rank_templates, "rank")
-                
-                # Guardar mejores scores por cada número
                 if test_name not in best_candidates or test_score > best_candidates[test_name]['score']:
                     best_candidates[test_name] = {
                         'score': test_score,
                         'version': version_name,
                         'scale': scale
                     }
-        
-        # Analizar los mejores candidatos
+
         if best_candidates:
-            # Ordenar por score
             sorted_candidates = sorted(best_candidates.items(), key=lambda x: x[1]['score'], reverse=True)
-            
-            print(f"  Top candidatos:")
-            for rank_name, info in sorted_candidates[:3]:
-                print(f"    {rank_name}: {info['score']:.3f} ({info['version']}, scale={info['scale']:.2f})")
-            
-            # REGLAS ESPECÍFICAS para desambiguar
             top_rank, top_info = sorted_candidates[0]
             second_rank, second_info = sorted_candidates[1] if len(sorted_candidates) > 1 else (None, {'score': 0})
-            
-            # Diferencia entre los dos mejores
             score_diff = top_info['score'] - second_info['score']
-            
-            # Validación para 8 vs 5
+
+            # Validación para 8 vs 5 (implícita en tu versión anterior a través de características)
             if name == '8' and '5' in [r for r, _ in sorted_candidates[:2]]:
-                # El 8 tiene dos círculos cerrados, el 5 solo uno
-                # Buscar características específicas
                 _, binary = cv2.threshold(rank_symbol_enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                
-                # Contar regiones cerradas (componentes conectados en la versión invertida)
                 inverted = cv2.bitwise_not(binary)
-                num_labels, labels = cv2.connectedComponents(inverted)
-                
-                # El 8 debería tener más componentes cerrados que el 5
-                if num_labels >= 3 and top_rank == '8':  # 1 fondo + 2 círculos internos del 8
-                    print(f"  → Confirmado '8' por componentes cerrados ({num_labels})")
+                num_labels, _ = cv2.connectedComponents(inverted)
+                if num_labels >= 3 and top_rank == '8':
                     name, score = '8', max(top_info['score'], 0.70)
                 elif num_labels <= 2 and top_rank == '5':
-                    print(f"  → Confirmado '5' por componentes cerrados ({num_labels})")
                     name, score = '5', max(top_info['score'], 0.70)
                 elif score_diff > 0.15:
                     name, score = top_rank, top_info['score']
-            
-            # Validación para 10 vs 6
-            elif name == '10' and '6' in [r for r, _ in sorted_candidates[:2]]:
-                # El 10 tiene dos dígitos separados, el 6 es un solo dígito
-                # Detectar si hay espacio horizontal significativo (gap entre 1 y 0)
+
+            # Validación para 10 vs 6 (si no vino del doble dígito)
+            elif name == '10' and '6' in [r for r, _ in sorted_candidates[:2]] and not combined_10_valid:
                 _, binary = cv2.threshold(rank_symbol_enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-                
-                # Proyección horizontal
                 horizontal_projection = np.sum(binary, axis=0)
-                
-                # Buscar valles (espacios vacíos) en la proyección
                 threshold_valley = 0.2 * horizontal_projection.max()
                 valleys = horizontal_projection < threshold_valley
-                
-                # Contar transiciones (cambios de píxel blanco a negro)
                 transitions = 0
                 for i in range(1, len(valleys)):
                     if valleys[i] != valleys[i-1]:
                         transitions += 1
-                
-                # El 10 debería tener más transiciones por el gap entre dígitos
                 if transitions >= 4 and top_rank == '10':
-                    print(f"  → Confirmado '10' por separación de dígitos ({transitions} transiciones)")
                     name, score = '10', max(top_info['score'], 0.70)
                 elif transitions <= 3 and top_rank == '6':
-                    print(f"  → Confirmado '6' por dígito único ({transitions} transiciones)")
                     name, score = '6', max(top_info['score'], 0.70)
                 elif score_diff > 0.15:
                     name, score = top_rank, top_info['score']
-            
-            # Validación para 3 vs 6 vs 8
+
+            # Validación para 3 vs 6/8
             elif name == '3' and any(r in ['6', '8'] for r, _ in sorted_candidates[:2]):
-                # El 3 tiene curvas abiertas hacia la derecha, 6 y 8 más cerradas
-                # Analizar la distribución de píxeles en cuadrantes
                 _, binary = cv2.threshold(rank_symbol_enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
                 h_mid = h // 2
                 w_mid = w // 2
-                
-                # Dividir en cuadrantes
                 top_left = np.sum(binary[:h_mid, :w_mid])
                 top_right = np.sum(binary[:h_mid, w_mid:])
                 bottom_left = np.sum(binary[h_mid:, :w_mid])
                 bottom_right = np.sum(binary[h_mid:, w_mid:])
-                
-                # El 3 tiene más píxeles en el lado derecho
                 right_ratio = (top_right + bottom_right) / (top_left + bottom_left + 1e-6)
-                
                 if right_ratio > 1.2 and top_rank == '3':
-                    print(f"  → Confirmado '3' por distribución derecha ({right_ratio:.2f})")
                     name, score = '3', max(top_info['score'], 0.70)
                 elif right_ratio <= 1.2 and top_rank in ['6', '8']:
-                    print(f"  → Confirmado '{top_rank}' por distribución ({right_ratio:.2f})")
                     name, score = top_rank, max(top_info['score'], 0.70)
                 elif score_diff > 0.15:
                     name, score = top_rank, top_info['score']
-            
-            # Para otros casos, si hay diferencia significativa, usar el mejor
+
+            # NUEVO: 2 vs 3/7/J
+            elif name == '2' and any(r in ['3', '7', 'J'] for r, _ in sorted_candidates[:2]):
+                # 2 no debe tener "huecos" cerrados internos significativos
+                _, binary_inv = cv2.threshold(rank_symbol_enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                num_labels, _ = cv2.connectedComponents(binary_inv)
+                likely_two = num_labels <= 2  # fondo + trazo principal
+
+                # Distribución por cuadrantes: el 2 tiene cola inferior derecha marcada
+                h_mid = h // 2
+                w_mid = w // 2
+                bottom_right = np.sum(binary_inv[h_mid:, w_mid:])
+                top_right = np.sum(binary_inv[:h_mid, w_mid:])
+                right_bias = (bottom_right + 1e-6) / (top_right + 1e-6)
+
+                if likely_two and right_bias > 1.10 and top_rank == '2':
+                    name, score = '2', max(top_info['score'], 0.70)
+                elif score_diff > 0.15:
+                    name, score = top_rank, top_info['score']
+                else:
+                    # Favorecer '2' si está cerca y no hay huecos internos
+                    two_info = best_candidates.get('2')
+                    if two_info and two_info['score'] > 0.60 and likely_two:
+                        name, score = '2', two_info['score']
+
+            # Fallback genérico
             elif score_diff > 0.20:
                 name, score = top_rank, top_info['score']
             elif top_info['score'] > 0.70:
                 name, score = top_rank, top_info['score']
-    
-    # Para ranks no problemáticos o con score alto, mantener el resultado original
+
     elif score < 0.50:
-        # Hacer una búsqueda adicional con variaciones
+        # Búsqueda adicional con escalas
         best_name, best_score = name, score
-        
         for scale in [0.85, 0.90, 0.95, 1.0, 1.05, 1.10]:
             nh, nw = int(h * scale), int(w * scale)
             if nh <= 0 or nw <= 0:
                 continue
-            
             scaled = cv2.resize(rank_symbol_denoised, (nw, nh))
             n_name, n_score, _ = enhanced_match_symbol_v2(scaled, rank_templates, "rank")
-            
             if n_score > best_score:
                 best_score = n_score
                 best_name = n_name
-        
         return best_name, best_score
-    
+
     return name, score
 
 # =========================================================
@@ -1924,10 +1935,10 @@ def interactive_process_and_classify(image_path, rank_templates, suit_templates,
         print(f"  Diamante: diamond_score={diamondf.get('diamond_feature_score',0):.3f} "
               f"approx_vertices={diamondf.get('approx_vertices')} radial_uni={diamondf.get('radial_uniformity',0):.3f} "
               f"angle_uni={diamondf.get('angle_uniformity',0):.3f} orient_score={diamondf.get('orientation_score',0):.3f}")
-        print(f"  Trébol: clover_score={cloverf.get('clover_feature_score',0):.3f} "  # NUEVO
+        print(f"  Trébol: clover_score={cloverf.get('clover_feature_score',0):.3f} "
               f"lobe_count={cloverf.get('lobe_count')} base_narrow={cloverf.get('base_narrowness',0):.3f} "
               f"complexity={cloverf.get('top_bottom_complexity',0):.3f} defects_score={cloverf.get('convexity_defects_score',0):.3f}")
-        print(f"  Pica: spade_score={spadef.get('spade_feature_score',0):.3f} "  # NUEVO
+        print(f"  Pica: spade_score={spadef.get('spade_feature_score',0):.3f} "
               f"peak_sharpness={spadef.get('peak_sharpness',0):.3f} vertical_aspect={spadef.get('vertical_aspect',0):.3f} "
               f"lateral_symmetry={spadef.get('lateral_symmetry',0):.3f} base_narrowness={spadef.get('base_narrowness',0):.3f} "
               f"top_concentration={spadef.get('top_concentration',0):.3f}")
