@@ -169,7 +169,6 @@ Justificación:
 
 ## 5. Otras tareas realizadas
 
-- Refactorización por módulos (io, geometry, roi, rank, features, resegment, suit, templates, pipeline) sin cambios de lógica.
 - Exportación de resultados a CSV.
 - Panel de depuración y overlay en vivo (FPS, cartas detectadas, lista lateral).
 - Captura de cartas estables a disco.
