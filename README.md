@@ -3,6 +3,17 @@
 Autor: Diegoza04
 Repositorio: [card_Detector](https://github.com/Diegoza04/card_Detector)
 
+## Índice
+1. Hardware: listado de elementos usados en el proyecto y justificación de uso
+2. Software: características técnicas y requisitos. Justificación de uso.
+3. Hoja de ruta del desarrollo
+4. Solución:
+   - Arquitectura y explicación
+5. Otras tareas realizadas
+6. Código fuente documentado 
+7. Requisitos de ejecucion
+8. Anexos / referencias
+
 ## 1. Hardware
 
 ### 1.1. Características técnicas y requisitos
@@ -68,24 +79,7 @@ Repositorio: [card_Detector](https://github.com/Diegoza04/card_Detector)
 
 ### 4.1. Diagrama de decisión (clasificación de cartas)
 
-```mermaid
-flowchart TD
-    A[Imagen (frame o archivo)] --> B[Gris + Otsu]
-    B --> C{Contorno de carta (4 vértices)}
-    C -->|No| X[Descartar / error]
-    C -->|Sí| D[Warp perspectiva (vertical)]
-    D --> E[Extraer esquina superior-izq (ROI)]
-    E --> F[Umbral múltiple y contornos en ROI]
-    F --> G[Separar Rank y Palo (bandas)]
-    G --> H1[Clasificar Rank]
-    G --> H2[Clasificar Palo]
-    H1 --> I1{Validaciones específicas}
-    I1 --> J1[Rank final]
-    H2 --> I2[Color + Forma + Features]
-    I2 --> J2[Palo final]
-    J1 --> K[Composición: "Rank de Palo"]
-    J2 --> K
-```
+![Diagrama de decisión](images/Diagrama_decision.svg)
 
 - Clasificación Rank:
   - Matching multiescala contra plantillas.
@@ -107,6 +101,8 @@ flowchart TD
     - Pica: punta superior, simetría lateral, base estrecha, aspect vertical.
 
 ### 4.2. Secuencialización de operaciones e interpretación de parámetros
+
+![Diagrama de decisión](images/Diagrama_secuencia.svg)
 
 1) Detección de contorno de carta
 - `cv2.threshold(..., THRESH_BINARY + THRESH_OTSU)`: Otsu se adapta al brillo global del frame.
@@ -194,4 +190,7 @@ Se añadieron docstrings y comentarios en módulos para facilitar mantenimiento.
   - Modo lote: `python card_dectector.py --content-dir content --template-dir template`
   - Modo en vivo: `python card_dectector.py --live --camera-url http://IP:4747/video`
 
-
+ ## 8. Anexos / referencias
+ 
+- Repositorio: Diegoza04/card_Detector
+- Herramientas sugeridas: OpenCV, NumPy, SciPy, pandoc (para PDF)
